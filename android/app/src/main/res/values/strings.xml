@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CryptoScan</string>
+    <string name="title_activity_main">CryptoScan</string>
+    <string name="package_name">com.gorillaether.cryptoscan</string>
+    <string name="custom_url_scheme">com.gorillaether.cryptoscan</string>
+</resources>
