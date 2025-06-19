@@ -37,7 +37,6 @@ export const rateLimitService = {
     ctx.font = '14px Arial';
     ctx.fillText('Device fingerprint', 2, 2);
     const canvasData = canvas.toDataURL();
-    
     const fingerprint = btoa(
       navigator.userAgent +
       navigator.language +
@@ -46,7 +45,6 @@ export const rateLimitService = {
       new Date().getTimezoneOffset() +
       canvasData.slice(-50)
     ).slice(0, 20);
-    
     return `user_${fingerprint}`;
   },
 
@@ -58,6 +56,11 @@ export const rateLimitService = {
       const docId = `${userId}_${today}`;
       const userUsageRef = doc(db, 'dailyUsage', docId);
 
+      // Calculate reset time (always needed)
+      const resetTime = new Date();
+      resetTime.setDate(resetTime.getDate() + 1);
+      resetTime.setHours(0, 0, 0, 0);
+
       // Get current usage for today
       const docSnap = await getDoc(userUsageRef);
 
@@ -67,10 +70,6 @@ export const rateLimitService = {
 
         // Check if limit exceeded
         if (currentCount >= maxUsesPerDay) {
-          const resetTime = new Date();
-          resetTime.setDate(resetTime.getDate() + 1);
-          resetTime.setHours(0, 0, 0, 0);
-          
           throw new Error(
             `Daily limit of ${maxUsesPerDay} scans reached! ` +
             `Resets at midnight (${resetTime.toLocaleTimeString()}).`
@@ -105,7 +104,7 @@ export const rateLimitService = {
           success: true,
           currentCount: 1,
           remaining: maxUsesPerDay - 1,
-          resetTime: 'midnight'
+          resetTime: resetTime.toLocaleTimeString()
         };
       }
 
@@ -114,7 +113,6 @@ export const rateLimitService = {
       if (error.message.includes('Daily limit')) {
         throw error;
       }
-      
       // For other errors, log and throw a generic error
       console.error('Error checking daily limit:', error);
       throw new Error('Unable to verify usage limit. Please try again.');
@@ -130,7 +128,6 @@ export const rateLimitService = {
       const userUsageRef = doc(db, 'dailyUsage', docId);
 
       const docSnap = await getDoc(userUsageRef);
-      
       if (docSnap.exists()) {
         const data = docSnap.data();
         return {
