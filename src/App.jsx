@@ -15,12 +15,15 @@ import {
   AlertCircle,
   Upload,
   Zap,
-  TrendingUp
+  TrendingUp,
+  ShieldCheck // Added for the rate limit UI
 } from 'lucide-react';
 
-import { cryptoService, visionService, searchService, geminiService, priceUtils } from './services/api';
+// REFACTORED: Imports are now simplified and point to the correct service files.
+import { imageAnalysisService } from './services/api';
+import { rateLimitService } from './services/firebase';
 
-// Utility function to convert HEX to RGBA
+// Utility function to convert HEX to RGBA (unchanged)
 function hexToRgba(hex, alpha) {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -29,23 +32,23 @@ function hexToRgba(hex, alpha) {
 }
 
 function App() {
-  // State management
+  // State management (simplified)
   const [isLoading, setIsLoading] = useState(false);
   const [capturedImage, setCapturedImage] = useState(null);
   const [analysisResult, setAnalysisResult] = useState(null);
-  const [productPrice, setProductPrice] = useState(null);
-  const [cryptoConversions, setCryptoConversions] = useState([]);
   const [selectedCryptos, setSelectedCryptos] = useState(['bitcoin', 'ethereum', 'litecoin', 'dogecoin']);
-  const [cryptoPrices, setCryptoPrices] = useState({});
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState(null);
   const [analysisStep, setAnalysisStep] = useState('');
 
-  // Refs
+  // NEW: State for rate limit usage
+  const [usageInfo, setUsageInfo] = useState({ used: 0, remaining: 10, total: 10 });
+
+  // Refs (unchanged)
   const webcamRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Available cryptocurrencies
+  // Available cryptocurrencies (unchanged)
   const availableCryptos = [
     { id: 'bitcoin', name: 'Bitcoin', symbol: 'BTC', color: '#f7931a' },
     { id: 'ethereum', name: 'Ethereum', symbol: 'ETH', color: '#627eea' },
@@ -57,23 +60,19 @@ function App() {
     { id: 'stellar', name: 'Stellar', symbol: 'XLM', color: '#7d00ff' }
   ];
 
-  // Load cryptocurrency prices on component mount and when selection changes
+  // NEW: Fetch user's scan usage on component mount
   useEffect(() => {
-    loadCryptoPrices();
-    const interval = setInterval(loadCryptoPrices, 60000); // Update every minute
-    return () => clearInterval(interval);
-  }, [selectedCryptos]);
+    const fetchUsage = async () => {
+      // Assuming a max of 10 uses, as defined in your service
+      const currentUsage = await rateLimitService.getCurrentUsage(10);
+      setUsageInfo(currentUsage);
+    };
+    fetchUsage();
+  }, []);
 
-  const loadCryptoPrices = async () => {
-    try {
-      const prices = await cryptoService.getCryptoPrices(selectedCryptos);
-      setCryptoPrices(prices);
-    } catch (error) {
-      console.error('Failed to load crypto prices:', error);
-    }
-  };
+  // REMOVED: The useEffect and loadCryptoPrices function for background price fetching are no longer needed.
 
-  // Capture image from webcam
+  // Capture image from webcam (unchanged)
   const captureImage = useCallback(() => {
     const imageSrc = webcamRef.current?.getScreenshot();
     if (imageSrc) {
@@ -84,7 +83,7 @@ function App() {
     }
   }, []);
 
-  // Handle file upload
+  // Handle file upload (unchanged)
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -106,159 +105,60 @@ function App() {
     }
   };
 
-  // Main image analysis function
+  // REWRITTEN: The main image analysis function is now clean and uses the new single service.
   const handleImageAnalysis = async (imageSrc) => {
     setIsLoading(true);
     setError(null);
     setAnalysisResult(null);
-    setProductPrice(null);
-    setCryptoConversions([]);
-    setAnalysisStep('Preparing image...');
+    setAnalysisStep('Starting analysis...');
 
     try {
       const base64Image = imageSrc.split(',')[1];
+      toast.info('🔍 Performing AI analysis...');
 
-      setAnalysisStep('Analyzing with AI vision...');
-      toast.info('🔍 Analyzing image with AI...');
-      const visionResult = await visionService.analyzeImage(base64Image);
+      const result = await imageAnalysisService.analyzeImageWithRateLimit(base64Image);
 
-      if (!visionResult.labels || visionResult.labels.length === 0) {
-        throw new Error('Could not identify any objects in the image');
-      }
-
-      setAnalysisStep('Getting product details...');
-      toast.info('🤖 Enhancing analysis with Gemini AI...');
-      let geminiResult = null;
-      try {
-        geminiResult = await geminiService.analyzeImageWithGemini(
-          base64Image,
-          visionResult.labels.slice(0, 5)
-        );
-      } catch (geminiError) {
-        console.warn('Gemini analysis failed, continuing with Vision results:', geminiError);
-      }
-      
-      const productName = geminiResult?.product_name || visionResult.labels[0]?.description || 'Unknown Product';
-      let confidence = geminiResult?.confidence || 50;
-
-      setAnalysisStep('Searching for prices...');
-      let estimatedPrice = null;
-      let priceSource = 'unknown';
-      
-      try {
-          const searchResults = await searchService.searchProductPrice(productName);
-          const extractedPrices = priceUtils.extractPricesFromSearchResults(searchResults);
-          if (extractedPrices.length > 0) {
-              extractedPrices.sort((a, b) => a - b);
-              const mid = Math.floor(extractedPrices.length / 2);
-              estimatedPrice = extractedPrices.length % 2 === 0
-                  ? (extractedPrices[mid - 1] + extractedPrices[mid]) / 2
-                  : extractedPrices[mid];
-              priceSource = 'search';
-          }
-      } catch (searchError) {
-          console.warn('Search failed, trying Gemini price estimate:', searchError);
-      }
-
-      if (!estimatedPrice && geminiResult?.estimated_price_min && geminiResult?.estimated_price_max) {
-        estimatedPrice = (geminiResult.estimated_price_min + geminiResult.estimated_price_max) / 2;
-        priceSource = 'ai_estimate';
-      }
-
-      console.log('Final estimated price for conversion:', estimatedPrice);
-
-      let cryptoConversionsResult = null;
-      if (estimatedPrice && estimatedPrice > 0) {
-        setProductPrice({
-            amount: estimatedPrice,
-            source: priceSource,
-            productName: productName
+      if (result.success) {
+        setAnalysisResult(result.data);
+        setUsageInfo({
+          used: result.usage.current,
+          remaining: result.usage.remaining,
+          total: 10,
         });
-        toast.success(`💵 Found price: $${estimatedPrice.toFixed(2)} (${priceSource === 'search' ? 'from search' : 'AI estimate'})`);
-        cryptoConversionsResult = await convertToCrypto(estimatedPrice);
+        toast.success('🚀 Analysis complete!');
+        if (result.data.finalPrice) {
+          toast.success(`💵 Found price: $${result.data.finalPrice.toFixed(2)}`);
+        } else {
+          toast.warning('⚠️ Could not determine product price. Try a clearer image.');
+        }
       } else {
-        toast.warning('⚠️ Could not determine product price. Try a clearer image or different angle.');
-        setError('Price information not available for this product.');
+        // Handle both rate limit errors and other analysis errors from the service
+        setError(result.error);
+        toast.error(`❌ Analysis failed: ${result.error}`);
       }
-      
-      setAnalysisResult({
-        productName: productName,
-        estimatedPrice: estimatedPrice,
-        cryptoConversions: cryptoConversionsResult,
-        confidence: confidence,
-        vision: visionResult,
-        gemini: geminiResult
-      });
 
-    } catch (error) {
-      console.error('Error in image analysis:', error);
-      setError(error.message);
-      toast.error('❌ Analysis failed: ' + error.message);
+    } catch (err) {
+      console.error('Critical error during image analysis flow:', err);
+      setError(err.message || 'A critical error occurred. Please try again.');
+      toast.error('❌ A critical error occurred.');
     } finally {
       setIsLoading(false);
       setAnalysisStep('');
     }
   };
 
-  // Crypto conversion logic
-  const convertToCrypto = async (usdPrice) => {
-    try {
-      if (!usdPrice || isNaN(usdPrice) || usdPrice <= 0) {
-        console.warn('Invalid USD price for conversion:', usdPrice);
-        return null;
-      }
-  
-      toast.info('₿ Converting to cryptocurrencies...');
-      console.log('Converting USD price to crypto:', usdPrice);
-  
-      const cryptoData = await cryptoService.getCryptoPrices(selectedCryptos);
-      console.log('Current crypto prices:', cryptoData);
-  
-      const conversions = Object.keys(cryptoData).map(id => {
-        const priceInfo = cryptoData[id];
-        const cryptoInfo = availableCryptos.find(c => c.id === id);
-        
-        if (!priceInfo || !priceInfo.usd) return null;
-        
-        return {
-          name: cryptoInfo?.name || id,
-          symbol: cryptoInfo?.symbol || id.toUpperCase(),
-          color: cryptoInfo?.color || '#666666',
-          cryptoAmount: usdPrice / priceInfo.usd,
-          cryptoPrice: priceInfo.usd,
-          usdAmount: usdPrice,
-          change24h: priceInfo.usd_24h_change
-        };
-      }).filter(Boolean);
-  
-      console.log('Crypto conversions calculated:', conversions);
-      setCryptoConversions(conversions);
-      
-      if (conversions.length > 0) {
-        toast.success(`🚀 Converted to ${conversions.length} cryptocurrencies!`);
-      }
-      
-      return conversions;
-  
-    } catch (error) {
-      console.error('Error converting to crypto:', error);
-      toast.error('Failed to convert to cryptocurrency');
-      return null;
-    }
-  };
+  // REMOVED: The convertToCrypto function is no longer needed in this component.
 
-  // Reset all states
+  // Reset all states (unchanged)
   const resetAnalysis = () => {
     setCapturedImage(null);
     setAnalysisResult(null);
-    setProductPrice(null);
-    setCryptoConversions([]);
     setError(null);
     setAnalysisStep('');
     toast.info('🔄 Ready for new scan!');
   };
 
-  // Toggle crypto selection
+  // Toggle crypto selection (unchanged)
   const toggleCrypto = (cryptoId) => {
     setSelectedCryptos(prev => {
       const newSelection = prev.includes(cryptoId)
@@ -269,10 +169,23 @@ function App() {
         toast.warning('Please select at least one cryptocurrency');
         return prev;
       }
-
       return newSelection;
     });
   };
+
+  // DERIVED STATE: Get selected crypto conversions from the main analysisResult object.
+  const cryptoConversions = analysisResult?.conversions
+    ? Object.values(analysisResult.conversions)
+        .filter(conv => selectedCryptos.includes(conv.name.toLowerCase()))
+        .map(conv => {
+          const cryptoInfo = availableCryptos.find(c => c.id === conv.name.toLowerCase());
+          return {
+            ...conv,
+            symbol: cryptoInfo?.symbol || conv.name.toUpperCase().slice(0, 3),
+            color: cryptoInfo?.color || '#666666',
+          };
+        })
+    : [];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 p-4">
@@ -316,7 +229,12 @@ function App() {
                   <Camera size={24} className="text-blue-500" />
                   Capture Image
                 </h2>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
+                   {/* NEW: Daily Usage Display */}
+                   <div className="flex items-center gap-2 text-sm text-gray-500 bg-gray-100 px-3 py-1.5 rounded-full" title="Scans remaining today">
+                      <ShieldCheck size={16} className="text-green-500" />
+                      <span>{usageInfo.remaining} / {usageInfo.total} Scans</span>
+                  </div>
                   <button
                     onClick={() => setShowSettings(!showSettings)}
                     className={`p-3 rounded-lg transition-all duration-200 ${
@@ -362,7 +280,7 @@ function App() {
                       </div>
                     </div>
                   </div>
-                  
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <button
                       onClick={captureImage}
@@ -372,7 +290,7 @@ function App() {
                       <Camera size={24} />
                       {isLoading ? 'Processing...' : 'Capture Photo'}
                     </button>
-                    
+
                     <button
                       onClick={() => fileInputRef.current?.click()}
                       disabled={isLoading}
@@ -486,7 +404,7 @@ function App() {
               </div>
             )}
 
-            {/* Analysis Results */}
+            {/* Analysis Results (data binding is updated) */}
             {analysisResult && !isLoading && (
               <div className="card p-6 animate-fade-in border-2 border-green-100">
                 <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
@@ -503,7 +421,7 @@ function App() {
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                       <div>
                         <p className="text-gray-600">Product Name</p>
-                        <p className="font-medium text-gray-800">{analysisResult.productName}</p>
+                        <p className="font-medium text-gray-800">{analysisResult.gemini.product_name}</p>
                       </div>
                       <div>
                         <p className="text-gray-600">Category</p>
@@ -511,7 +429,7 @@ function App() {
                       </div>
                       <div>
                         <p className="text-gray-600">Confidence</p>
-                        <p className="font-medium text-gray-800">{analysisResult.confidence}%</p>
+                        <p className="font-medium text-gray-800">{analysisResult.gemini.confidence}%</p>
                       </div>
                       {analysisResult.gemini.estimated_price_min && (
                         <div>
@@ -546,8 +464,8 @@ function App() {
               </div>
             )}
 
-            {/* Price Results */}
-            {productPrice && !isLoading &&(
+            {/* Price Results (data binding is updated) */}
+            {analysisResult?.finalPrice > 0 && !isLoading &&(
               <div className="card p-6 animate-slide-up border-2 border-green-100">
                 <div className="flex items-center justify-between mb-6">
                   <h3 className="text-xl font-semibold flex items-center gap-2">
@@ -556,10 +474,10 @@ function App() {
                   </h3>
                   <div className="text-right">
                     <p className="text-3xl font-bold text-green-600">
-                      ${productPrice.amount.toFixed(2)}
+                      ${analysisResult.finalPrice.toFixed(2)}
                     </p>
                     <p className="text-sm text-gray-500 capitalize">
-                      {productPrice.source === 'search' ? 'Market Price' : 'AI Estimate'}
+                      {analysisResult.extractedPrice ? 'Market Price' : 'AI Estimate'}
                     </p>
                   </div>
                 </div>
@@ -570,14 +488,13 @@ function App() {
                       <Bitcoin size={20} />
                       Cryptocurrency Equivalents
                     </h4>
-                    
+
                     <div className="grid gap-4">
                       {cryptoConversions.map((conversion, index) => (
                         <div
                           key={index}
                           className="crypto-card rounded-xl p-4 transition-all hover:scale-105 duration-200 text-white"
                           style={{
-                            // [FIXED] Increased opacity for better readability
                             background: `linear-gradient(135deg, ${hexToRgba(conversion.color, 0.7)}, ${hexToRgba(conversion.color, 0.5)})`
                           }}
                         >
@@ -592,7 +509,7 @@ function App() {
                               <div>
                                 <h5 className="font-semibold text-lg">{conversion.name}</h5>
                                 <p className="text-sm opacity-75">
-                                  1 {conversion.symbol} = ${conversion.cryptoPrice.toLocaleString(undefined, {
+                                  1 {conversion.symbol} = ${conversion.usd_price.toLocaleString(undefined, {
                                     minimumFractionDigits: 2,
                                     maximumFractionDigits: 2
                                   })}
@@ -601,10 +518,10 @@ function App() {
                             </div>
                             <div className="text-right">
                               <p className="text-2xl font-bold">
-                                {conversion.cryptoAmount.toFixed(8)} {conversion.symbol}
+                                {conversion.crypto_amount.toFixed(8)} {conversion.symbol}
                               </p>
                               <p className="text-sm opacity-75">
-                                ${conversion.usdAmount.toFixed(2)} USD
+                                ${analysisResult.finalPrice.toFixed(2)} USD
                               </p>
                             </div>
                           </div>
@@ -662,26 +579,40 @@ function App() {
 
         {/* Footer */}
         <footer className="text-center mt-12 py-8 border-t border-gray-200">
-          <div className="flex items-center justify-center gap-2 mb-4">
-            <div className="flex items-center gap-4 text-sm text-gray-500">
-              <span className="flex items-center gap-1">
-                <span className="w-2 h-2 bg-green-500 rounded-full"></span>
-                Google Vision AI
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
-                Gemini AI
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-2 h-2 bg-orange-500 rounded-full"></span>
-                CoinGecko API
-              </span>
-            </div>
+        <div className="flex items-center justify-center gap-2 mb-4">
+          <div className="flex items-center gap-4 text-sm text-gray-500">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 bg-green-500 rounded-full"></span>
+              Google Vision AI
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+              Gemini AI
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 bg-orange-500 rounded-full"></span>
+              CoinGecko API
+            </span>
           </div>
-          <p className="text-gray-400 text-sm">
-            Built with React + Vite • Real-time cryptocurrency prices • AI-powered object recognition
-          </p>
-        </footer>
+        </div>
+
+        {/* Add your website link - more prominent */}
+        <div className="mb-4">
+          <a 
+            href="https://gorillaether.com" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white font-semibold rounded-full hover:from-blue-600 hover:to-purple-700 transition-all duration-200 transform hover:scale-105 shadow-lg"
+          >
+            <span>🦍</span>
+            Visit GorillaEther.com
+          </a>
+        </div>
+
+        <p className="text-gray-400 text-sm">
+          Built with React + Vite • Real-time cryptocurrency prices • AI-powered object recognition
+        </p>
+      </footer>
       </div>
     </div>
   );

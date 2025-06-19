@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { rateLimitService } from './firebase.js';
 
 // API base configurations
 const COINGECKO_BASE_URL = 'https://api.coingecko.com/api/v3';
@@ -17,7 +18,116 @@ const googleApi = axios.create({
   timeout: 15000,
 });
 
-// CoinGecko API Services
+// Main Rate-Limited Image Analysis Service
+export const imageAnalysisService = {
+  async analyzeImageWithRateLimit(imageBase64) {
+    try {
+      // Check rate limit BEFORE making any expensive API calls
+      console.log('Checking daily usage limit...');
+      const limitCheck = await rateLimitService.checkDailyLimit(10);
+      
+      console.log(`Scan ${limitCheck.currentCount}/10 today. ${limitCheck.remaining} remaining.`);
+      
+      // If we pass the rate limit, proceed with the analysis
+      const analysisResult = await this.performFullAnalysis(imageBase64);
+      
+      return {
+        success: true,
+        data: analysisResult,
+        usage: {
+          current: limitCheck.currentCount,
+          remaining: limitCheck.remaining,
+          resetTime: limitCheck.resetTime
+        }
+      };
+      
+    } catch (error) {
+      // Handle rate limit errors specifically
+      if (error.message.includes('Daily limit')) {
+        return {
+          success: false,
+          error: error.message,
+          rateLimited: true
+        };
+      }
+      
+      // Handle other errors
+      console.error('Error in rate-limited analysis:', error);
+      return {
+        success: false,
+        error: error.message || 'Analysis failed',
+        rateLimited: false
+      };
+    }
+  },
+
+  async performFullAnalysis(imageBase64) {
+    try {
+      console.log('Starting image analysis...');
+      
+      // Step 1: Google Vision API
+      console.log('Analyzing with Google Vision...');
+      const visionResults = await visionService.analyzeImage(imageBase64);
+      
+      // Step 2: Gemini AI Analysis
+      console.log('Analyzing with Gemini AI...');
+      const geminiResults = await geminiService.analyzeImageWithGemini(imageBase64, visionResults.objects);
+      
+      // Step 3: Price Search (if we have a product name)
+      let searchResults = null;
+      let extractedPrice = null;
+      
+      if (geminiResults.product_name && geminiResults.product_name !== 'Unknown Product') {
+        console.log('Searching for product prices...');
+        searchResults = await searchService.searchProductPrice(geminiResults.product_name);
+        extractedPrice = priceUtils.extractPricesFromSearchResults(searchResults);
+      }
+      
+      // Step 4: Get cryptocurrency prices
+      console.log('Getting cryptocurrency prices...');
+      const cryptoPrices = await cryptoService.getCryptoPrices();
+      
+      // Step 5: Calculate conversions
+      const finalPrice = extractedPrice || geminiResults.estimated_price_max || 25; // fallback price
+      const conversions = await this.calculateCryptoConversions(finalPrice, cryptoPrices);
+      
+      return {
+        vision: visionResults,
+        gemini: geminiResults,
+        searchResults: searchResults,
+        extractedPrice: extractedPrice,
+        finalPrice: finalPrice,
+        cryptoPrices: cryptoPrices,
+        conversions: conversions,
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('Error in full analysis:', error);
+      throw new Error(`Analysis failed: ${error.message}`);
+    }
+  },
+
+  async calculateCryptoConversions(usdPrice, cryptoPrices) {
+    const conversions = {};
+    
+    for (const [cryptoId, priceData] of Object.entries(cryptoPrices)) {
+      if (priceData.usd) {
+        conversions[cryptoId] = {
+          name: cryptoId,
+          usd_price: priceData.usd,
+          crypto_amount: usdPrice / priceData.usd,
+          change_24h: priceData.usd_24h_change || 0,
+          market_cap: priceData.usd_market_cap || 0
+        };
+      }
+    }
+    
+    return conversions;
+  }
+};
+
+// CoinGecko API Services (unchanged)
 export const cryptoService = {
   // Get cryptocurrency prices
   async getCryptoPrices(cryptoIds = ['bitcoin', 'ethereum', 'litecoin', 'dogecoin']) {
@@ -77,7 +187,7 @@ export const cryptoService = {
   }
 };
 
-// Google Vision API for object detection
+// Google Vision API for object detection (unchanged)
 export const visionService = {
   async analyzeImage(imageBase64) {
     try {
@@ -114,7 +224,7 @@ export const visionService = {
   }
 };
 
-// Enhanced Google Custom Search API for product pricing
+// Enhanced Google Custom Search API for product pricing (unchanged)
 export const searchService = {
   // Categorize products for better search terms
   getProductCategory(productName) {
@@ -128,7 +238,6 @@ export const searchService = {
     };
 
     const lowercaseProduct = productName.toLowerCase();
-    
     for (const [category, keywords] of Object.entries(categories)) {
       if (keywords.some(keyword => lowercaseProduct.includes(keyword))) {
         return category;
@@ -156,9 +265,7 @@ export const searchService = {
     try {
       const category = this.getProductCategory(productName);
       const query = this.buildSearchQuery(productName, category);
-      
       console.log(`Searching for: "${query}" (Category: ${category})`);
-      
       const response = await googleApi.get(
         `https://www.googleapis.com/customsearch/v1`,
         {
@@ -174,7 +281,6 @@ export const searchService = {
 
       const searchResults = response.data.items || [];
       console.log(`Found ${searchResults.length} search results`);
-      
       return searchResults;
     } catch (error) {
       console.error('Error searching product price:', error);
@@ -183,7 +289,7 @@ export const searchService = {
   }
 };
 
-// Fixed Gemini AI API for enhanced object recognition and price estimation
+// Fixed Gemini AI API for enhanced object recognition and price estimation (unchanged)
 export const geminiService = {
   async analyzeImageWithGemini(imageBase64, detectedObjects) {
     try {
@@ -192,7 +298,7 @@ Analyze this image and the detected objects: ${JSON.stringify(detectedObjects)}
 
 Please provide:
 1. The most likely product name and brand
-2. Estimated price range in USD  
+2. Estimated price range in USD 
 3. Category of the product
 4. Confidence level of identification
 
@@ -234,7 +340,6 @@ Return as JSON format:
 
       const generatedText = response.data.candidates[0]?.content?.parts[0]?.text;
       console.log('Gemini raw response:', generatedText);
-      
       if (generatedText) {
         // Try to parse JSON from the response
         const jsonMatch = generatedText.match(/\{[\s\S]*\}/);
@@ -247,18 +352,15 @@ Return as JSON format:
           }
         }
       }
-      
       throw new Error('Invalid response format from Gemini');
     } catch (error) {
       console.error('Error analyzing with Gemini:', error);
-      
       // If it's a 403/404 error, likely API key issue
       if (error.response?.status === 403) {
         throw new Error('Gemini API key is invalid or has no quota');
       } else if (error.response?.status === 404) {
         throw new Error('Gemini API endpoint not found - check API key setup');
       }
-      
       throw new Error('Failed to analyze with Gemini AI');
     }
   },
@@ -282,19 +384,19 @@ Return as JSON format:
   }
 };
 
-// Enhanced price extraction utility
+// Enhanced price extraction utility (unchanged)
 export const priceUtils = {
   extractPriceFromText(text) {
     // Enhanced regular expressions to match various price formats
     const pricePatterns = [
-      /\$(\d+(?:,\d{3})*(?:\.\d{2})?)/g,                // $12.99, $1,299.99
+      /\$(\d+(?:,\d{3})*(?:\.\d{2})?)/g, // $12.99, $1,299.99
       /(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:USD|dollars?)/gi, // 12.99 USD, 15 dollars
-      /price[:\s]*\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,   // Price: $12.99, Price 15.99
-      /(\d+\.?\d*)\s*(?:dollar|buck)/gi,                // 12.5 dollars, 15 bucks
-      /save.*\$(\d+\.?\d*)/gi,                          // Save $5.00
-      /was.*\$(\d+\.?\d*)/gi,                           // Was $15.99
-      /from.*\$(\d+\.?\d*)/gi,                          // From $8.99
-      /starting.*\$(\d+\.?\d*)/gi,                      // Starting at $6.99
+      /price[:\s]*\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/gi, // Price: $12.99, Price 15.99
+      /(\d+\.?\d*)\s*(?:dollar|buck)/gi, // 12.5 dollars, 15 bucks
+      /save.*\$(\d+\.?\d*)/gi, // Save $5.00
+      /was.*\$(\d+\.?\d*)/gi, // Was $15.99
+      /from.*\$(\d+\.?\d*)/gi, // From $8.99
+      /starting.*\$(\d+\.?\d*)/gi, // Starting at $6.99
     ];
 
     const prices = [];
@@ -314,11 +416,9 @@ export const priceUtils = {
   // Enhanced price extraction from search results
   extractPricesFromSearchResults(searchResults) {
     const allPrices = [];
-    
     searchResults.forEach(result => {
       const text = `${result.title} ${result.snippet}`.toLowerCase();
       const prices = this.extractPriceFromText(text);
-      
       if (prices) {
         prices.forEach(price => {
           allPrices.push({
@@ -343,6 +443,8 @@ export const priceUtils = {
 };
 
 export default {
+  imageAnalysisService,
+  rateLimitService,
   cryptoService,
   visionService,
   searchService,
